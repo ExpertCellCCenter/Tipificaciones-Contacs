@@ -98,7 +98,11 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-def to_excel_bytes(df: pd.DataFrame, sheet_name="m27") -> bytes:
+def to_excel_bytes(df: pd.DataFrame, sheet_name="m27", max_autofit_rows: int = 200) -> bytes:
+    """
+    Safer Excel export to avoid Streamlit Cloud crashes:
+    - Auto-fit widths using ONLY header + first N rows (NOT the whole dataset).
+    """
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
@@ -112,11 +116,17 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name="m27") -> bytes:
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    for col_idx, col_cells in enumerate(ws.columns, start=1):
-        max_len = 0
-        for cell in col_cells:
-            val = "" if cell.value is None else str(cell.value)
-            max_len = max(max_len, len(val))
+    # ✅ Auto-fit using a SAMPLE (header + first N rows)
+    sample_last_row = min(ws.max_row, 1 + max_autofit_rows)  # row 1 is header
+    for col_idx in range(1, ws.max_column + 1):
+        max_len = 10  # minimum baseline
+        # header
+        hv = ws.cell(row=1, column=col_idx).value
+        max_len = max(max_len, len("" if hv is None else str(hv)))
+        # sample rows
+        for row in range(2, sample_last_row + 1):
+            v = ws.cell(row=row, column=col_idx).value
+            max_len = max(max_len, len("" if v is None else str(v)))
         ws.column_dimensions[get_column_letter(col_idx)].width = min(max(10, max_len + 2), 60)
 
     out2 = BytesIO()
@@ -176,14 +186,13 @@ def load_bonsaif_section(section_name: str):
     if not campaigns:
         raise RuntimeError(f"{section_name}: no hay campañas válidas en CAMPAIGNS")
 
-    # ✅ DEFAULT DATE RANGE: first day of current month -> today (still clamped to oldest_allowed)
+    # ✅ DEFAULT DATE RANGE: first day of current month -> today (clamped to oldest_allowed)
     today = date.today()
     oldest_allowed = today - timedelta(days=92)
     month_start = date(today.year, today.month, 1)
 
     default_start = max(month_start, oldest_allowed)
     default_end = today
-
     default_start = max(default_start, oldest_allowed)
     default_end = min(default_end, today)
 
@@ -238,7 +247,7 @@ def make_pct_table(grouped: pd.DataFrame, group_col: str, cat_col: str, value_co
     return pd.concat([pivot, pct], axis=1).reset_index()
 
 # ----------------------------------------------------
-# ✅ ADEUDO parsing from Obs_CC
+# ✅ ADEUDO parsing from Obs_CC  (threshold: < $800 => ADEUDO_TRATABLE)
 # ----------------------------------------------------
 _RE_MONEY = re.compile(
     r"(?i)(?:\$|mxn|pesos|adeudo|deuda)\s*[:\-]?\s*\$?\s*([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)(?:\.[0-9]+)?"
@@ -274,7 +283,12 @@ def _parse_amount_from_obs(text: str) -> float | None:
         return None
     return max(vals)
 
-def add_adeudo_tratable(df: pd.DataFrame, col_result: str | None, col_obs: str | None) -> tuple[pd.DataFrame, str | None]:
+def add_adeudo_tratable(
+    df: pd.DataFrame,
+    col_result: str | None,
+    col_obs: str | None,
+    threshold: float = 800.0,
+) -> tuple[pd.DataFrame, str | None]:
     if df is None or df.empty or not col_result:
         return df, None
 
@@ -292,22 +306,18 @@ def add_adeudo_tratable(df: pd.DataFrame, col_result: str | None, col_obs: str |
         obs_vals = out.loc[mask_adeudo, col_obs].astype(str)
         amounts = obs_vals.map(_parse_amount_from_obs)
 
-        treatable_mask = amounts.notna() & (amounts < 500)
+        treatable_mask = amounts.notna() & (amounts < threshold)
         idx_treatable = out.loc[mask_adeudo].index[treatable_mask.values]
-        out.loc[idx_treatable, adj_col] = "ADEUDO TRABTABLE"
+        out.loc[idx_treatable, adj_col] = "ADEUDO_TRATABLE"
 
     return out, adj_col
 
 # ----------------------------------------------------
 # ✅ ADD SUPERVISOR COLUMN TO SUMMARY TABLE (Tipificación)
+# - NO "Supervisores_n"
+# - DO show "SIN_SUPERVISOR" (but never show NaN)
 # ----------------------------------------------------
 def attach_supervisor_to_tipificacion_table(tbl: pd.DataFrame, df_src: pd.DataFrame, group_col: str) -> pd.DataFrame:
-    """
-    Adds Supervisor to the aggregated table.
-    - If grouping by Agente -> map Agent -> Supervisor (mode)
-    - If grouping by Campana -> adds Supervisor_top + Supervisores_n
-    - If grouping by Supervisor -> nothing (already the group)
-    """
     if tbl is None or tbl.empty:
         return tbl
     if df_src is None or df_src.empty:
@@ -320,23 +330,28 @@ def attach_supervisor_to_tipificacion_table(tbl: pd.DataFrame, df_src: pd.DataFr
         return tbl
 
     out = tbl.copy()
+    src = df_src.copy()
+
+    # ✅ Normalize supervisor to avoid NaN display but keep SIN_SUPERVISOR
+    src["Supervisor"] = src["Supervisor"].astype(str).replace({"nan": "", "None": ""}).str.strip()
+    src.loc[src["Supervisor"].eq(""), "Supervisor"] = "SIN_SUPERVISOR"
 
     if group_col == "Campana":
         sup_agg = (
-            df_src.groupby("Campana")["Supervisor"]
+            src.groupby("Campana")["Supervisor"]
             .agg(
                 Supervisor_top=lambda x: (x.mode().iloc[0] if not x.mode().empty else "SIN_SUPERVISOR"),
-                Supervisores_n=lambda x: x.nunique(dropna=True),
             )
             .reset_index()
         )
         out = out.merge(sup_agg, on="Campana", how="left")
-        front = ["Campana", "Supervisor_top", "Supervisores_n"]
+
+        front = ["Campana", "Supervisor_top"]
         rest = [c for c in out.columns if c not in front]
         return out[front + rest]
 
     sup_map = (
-        df_src.groupby(group_col)["Supervisor"]
+        src.groupby(group_col)["Supervisor"]
         .agg(lambda x: (x.mode().iloc[0] if not x.mode().empty else "SIN_SUPERVISOR"))
         .reset_index()
     )
@@ -381,6 +396,12 @@ if "last_query" not in st.session_state:
 if "last_msg" not in st.session_state:
     st.session_state.last_msg = None
 
+# Excel session state (on-demand)
+if "excel_bytes" not in st.session_state:
+    st.session_state.excel_bytes = None
+if "excel_key" not in st.session_state:
+    st.session_state.excel_key = None
+
 with st.sidebar:
     st.header("Filtros")
 
@@ -406,6 +427,8 @@ if clear_btn:
     st.session_state.last_ts = None
     st.session_state.last_query = None
     st.session_state.last_msg = None
+    st.session_state.excel_bytes = None
+    st.session_state.excel_key = None
     st.rerun()
 
 current_query = (source_label, d_start, d_end)
@@ -482,16 +505,16 @@ if col_hang:
 else:
     df["Hangup_Flag"] = False
 
-# Supervisor unified
+# Supervisor unified (avoid NaN display, keep SIN_SUPERVISOR)
 if "Supervisor" not in df.columns:
     if col_supervisor_auto:
-        df["Supervisor"] = df[col_supervisor_auto].astype(str).fillna("").str.strip()
+        df["Supervisor"] = df[col_supervisor_auto].astype(str).replace({"nan": "", "None": ""}).str.strip()
         df.loc[df["Supervisor"].eq(""), "Supervisor"] = "SIN_SUPERVISOR"
     else:
         df["Supervisor"] = "SIN_SUPERVISOR"
 
-# Adjusted Código Resultado (adeudo rule)
-df, col_result = add_adeudo_tratable(df, col_result_raw, col_obs)
+# Adjusted Código Resultado (adeudo rule, <800 => ADEUDO_TRATABLE)
+df, col_result = add_adeudo_tratable(df, col_result_raw, col_obs, threshold=800.0)
 if not col_result:
     col_result = col_result_raw
 
@@ -576,6 +599,25 @@ hang_rate = (df_f["Hangup_Flag"].mean() * 100) if len(df_f) else 0
 k4.metric("Agente colgó (%)", f"{hang_rate:,.2f}%")
 
 # ----------------------------------------------------
+# EXCEL KEY (invalidate prepared excel when filters change)
+# ----------------------------------------------------
+excel_key = (
+    source_label,
+    str(d_start),
+    str(d_end),
+    tuple(selected_campaigns),
+    tuple(selected_sup),
+    tuple(selected_agents),
+    tuple(selected_estatus),
+    tuple(selected_results),
+    hang_filter,
+)
+
+if st.session_state.excel_key != excel_key:
+    st.session_state.excel_key = excel_key
+    st.session_state.excel_bytes = None  # invalidate old prepared file
+
+# ----------------------------------------------------
 # TABS
 # ----------------------------------------------------
 tab1, tab2, tab3, tab4 = st.tabs(
@@ -594,14 +636,12 @@ with tab1:
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        # ✅ TABLE WITH SUPERVISOR ADDED
         tbl = make_pct_table(g, group_col, col_estatus, "count")
         tbl = attach_supervisor_to_tipificacion_table(tbl, df_f, group_col)
-
         st.dataframe(tbl, use_container_width=True, height=420)
 
 with tab2:
-    st.markdown("### Análisis por **Código Resultado** (Calificación) — incluye ADEUDO TRATABLE (<$500)")
+    st.markdown("### Análisis por **Código Resultado** (Calificación) — incluye ADEUDO_TRATABLE (<$800)")
     if not col_result:
         st.info("No existe la columna Codigo_Resultado_CC en estos datos.")
     else:
@@ -625,14 +665,35 @@ with tab4:
     st.markdown("### Detalle filtrado")
     st.dataframe(df_f, use_container_width=True, height=520)
 
-    excel_bytes = to_excel_bytes(df_f, sheet_name="detalle_filtrado")
-    st.download_button(
-        "⬇️ Descargar Excel (filtrado)",
-        data=excel_bytes,
-        file_name=f"bonsaif_m27_{source_label}_detalle_filtrado.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
+    # ✅ ON-DEMAND Excel to avoid Streamlit Cloud crashes
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        prepare_excel = st.button("📦 Preparar Excel (on-demand)", use_container_width=True)
+    with c2:
+        clear_excel = st.button("🧹 Limpiar Excel preparado", use_container_width=True)
+
+    if clear_excel:
+        st.session_state.excel_bytes = None
+        st.success("Excel preparado eliminado.")
+        st.rerun()
+
+    if prepare_excel:
+        if len(df_f) > 60000:
+            st.warning("Hay muchos registros. Si tarda o falla, reduce el rango/filters antes de exportar.")
+        with st.spinner("Generando Excel..."):
+            st.session_state.excel_bytes = to_excel_bytes(df_f, sheet_name="detalle_filtrado", max_autofit_rows=200)
+        st.success("Excel listo ✅")
+
+    if st.session_state.excel_bytes:
+        st.download_button(
+            "⬇️ Descargar Excel (filtrado)",
+            data=st.session_state.excel_bytes,
+            file_name=f"bonsaif_m27_{source_label}_detalle_filtrado.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    else:
+        st.info("Para evitar crashes, el Excel se genera **solo** cuando presionas **Preparar Excel**.")
 
 if st.session_state.last_msg:
     with st.expander("Mensajes del API (por campaña)"):
