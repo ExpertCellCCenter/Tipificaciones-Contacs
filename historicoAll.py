@@ -20,7 +20,7 @@ from openpyxl.utils import get_column_letter
 # STREAMLIT CONFIG
 # ----------------------------------------------------
 st.set_page_config(
-    page_title="Bonsaif m=27 — Tipificación / Calificación / Colgó (GLOS)",
+    page_title="Bonsaif m=27 — Tipificación / Calificación / Colgó (CC2 + JV)",
     page_icon="📞",
     layout="wide",
 )
@@ -29,15 +29,13 @@ st.set_page_config(
 # HELPERS
 # ----------------------------------------------------
 def _strip_accents(s: str) -> str:
-    return "".join(ch for ch in unicodedata.normalize("NFKD", str(s)) if not unicodedata.combining(ch))
-
+    return "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
 
 def _norm_colname(s: str) -> str:
     s = str(s).strip()
     s = _strip_accents(s)
     s = s.replace(" ", "_")
     return s.lower()
-
 
 def first_existing_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
     if df is None or df.empty:
@@ -49,7 +47,6 @@ def first_existing_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
         if key in norm_map:
             return norm_map[key]
     return None
-
 
 def _pick_records_from_payload(payload):
     if payload is None:
@@ -66,7 +63,6 @@ def _pick_records_from_payload(payload):
                 return v
     return []
 
-
 def _payload_message(payload):
     if payload is None:
         return None
@@ -77,29 +73,6 @@ def _payload_message(payload):
             if k in payload and isinstance(payload[k], str) and payload[k].strip():
                 return payload[k].strip()
     return None
-
-
-def _clean_text_to_na(series: pd.Series) -> pd.Series:
-    """
-    Convert typical 'empty' strings to NA so we never display 'nan',
-    then you can fillna("SIN_SUPERVISOR") and it WILL show.
-    """
-    s = series.astype("string")
-    s = s.str.strip()
-    s = s.replace(
-        {
-            "": pd.NA,
-            "nan": pd.NA,
-            "NaN": pd.NA,
-            "None": pd.NA,
-            "NULL": pd.NA,
-            "null": pd.NA,
-            "N/A": pd.NA,
-            "n/a": pd.NA,
-        }
-    )
-    return s
-
 
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -125,8 +98,11 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-
-def to_excel_bytes(df: pd.DataFrame, sheet_name="m27") -> bytes:
+def to_excel_bytes(df: pd.DataFrame, sheet_name="m27", max_autofit_rows: int = 200) -> bytes:
+    """
+    Safer Excel export to avoid Streamlit Cloud crashes:
+    - Auto-fit widths using ONLY header + first N rows (NOT the whole dataset).
+    """
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
@@ -140,11 +116,17 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name="m27") -> bytes:
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    for col_idx, col_cells in enumerate(ws.columns, start=1):
-        max_len = 0
-        for cell in col_cells:
-            val = "" if cell.value is None else str(cell.value)
-            max_len = max(max_len, len(val))
+    # ✅ Auto-fit using a SAMPLE (header + first N rows)
+    sample_last_row = min(ws.max_row, 1 + max_autofit_rows)  # row 1 is header
+    for col_idx in range(1, ws.max_column + 1):
+        max_len = 10  # minimum baseline
+        # header
+        hv = ws.cell(row=1, column=col_idx).value
+        max_len = max(max_len, len("" if hv is None else str(hv)))
+        # sample rows
+        for row in range(2, sample_last_row + 1):
+            v = ws.cell(row=row, column=col_idx).value
+            max_len = max(max_len, len("" if v is None else str(v)))
         ws.column_dimensions[get_column_letter(col_idx)].width = min(max(10, max_len + 2), 60)
 
     out2 = BytesIO()
@@ -152,10 +134,8 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name="m27") -> bytes:
     out2.seek(0)
     return out2.read()
 
-
 def parse_date_yyyy_mm_dd(s: str) -> date:
     return datetime.strptime(s.strip(), "%Y-%m-%d").date()
-
 
 def validate_api_window(d_start: date, d_end: date):
     if d_end < d_start:
@@ -168,13 +148,11 @@ def validate_api_window(d_start: date, d_end: date):
         return False, "La fecha inicial no puede ser anterior a ~3 meses desde hoy (restricción del API)."
     return True, None
 
-
 def _get_section(*names: str) -> str:
     for n in names:
         if n in st.secrets:
             return n
     raise RuntimeError(f"No encontré ninguna sección en secrets.toml: {names}")
-
 
 def load_bonsaif_section(section_name: str):
     s = st.secrets[section_name]
@@ -184,6 +162,8 @@ def load_bonsaif_section(section_name: str):
         "METHOD": str(s.get("METHOD", "27")).strip(),
         "KEY": str(s.get("KEY", "")).strip(),
         "SYS": str(s.get("SYS", "")).strip(),
+        "FECHAINI": str(s.get("FECHAINI", "")).strip(),
+        "FECHAFIN": str(s.get("FECHAFIN", "")).strip(),
         "AUTO_FETCH": bool(s.get("AUTO_FETCH", True)),
     }
     if not cfg["KEY"] or not cfg["SYS"]:
@@ -206,29 +186,21 @@ def load_bonsaif_section(section_name: str):
     if not campaigns:
         raise RuntimeError(f"{section_name}: no hay campañas válidas en CAMPAIGNS")
 
-    # ✅ DEFAULT DATE RANGE: first day of current month -> today (still clamped to oldest_allowed)
+    # ✅ DEFAULT DATE RANGE: first day of current month -> today (clamped to oldest_allowed)
     today = date.today()
     oldest_allowed = today - timedelta(days=92)
     month_start = date(today.year, today.month, 1)
 
     default_start = max(month_start, oldest_allowed)
     default_end = today
+    default_start = max(default_start, oldest_allowed)
+    default_end = min(default_end, today)
 
     return cfg, default_start, default_end, campaigns
 
-
 @st.cache_data(show_spinner=False, ttl=300)
-def fetch_campaign(
-    base_url: str,
-    service: str,
-    method: str,
-    key: str,
-    sys: str,
-    fechaini: str,
-    fechafin: str,
-    campana: str,
-    campana_id: str,
-):
+def fetch_campaign(base_url: str, service: str, method: str, key: str, sys: str,
+                   fechaini: str, fechafin: str, campana: str, campana_id: str):
     params = {
         "service": service,
         "m": method,
@@ -254,11 +226,9 @@ def fetch_campaign(
     df = normalize_df(df)
     return df, msg
 
-
 def compute_hangup_flag(series: pd.Series) -> pd.Series:
     s = series.astype(str).str.strip().str.lower()
     return s.isin(["si", "s", "1", "true", "yes", "y"])
-
 
 def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
     out = df.copy()
@@ -269,22 +239,32 @@ def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
             out = out[out[colname].astype(str).isin([str(x) for x in selected])]
     return out
 
-
 def make_pct_table(grouped: pd.DataFrame, group_col: str, cat_col: str, value_col: str = "count") -> pd.DataFrame:
     pivot = grouped.pivot_table(index=group_col, columns=cat_col, values=value_col, aggfunc="sum", fill_value=0)
+
+    # ✅ ONLY CHANGE: rename blank/NaN headers to "Sin Tipificacion" (and merge if duplicates)
+    new_cols = []
+    for c in pivot.columns:
+        s = "" if c is None else str(c).strip()
+        if s == "" or s.lower() == "nan":
+            new_cols.append("Sin Tipificacion")
+        else:
+            new_cols.append(s)
+    pivot.columns = new_cols
+    if len(set(new_cols)) != len(new_cols):
+        pivot = pivot.groupby(level=0, axis=1).sum()
+
     row_sum = pivot.sum(axis=1).replace(0, 1)
     pct = (pivot.div(row_sum, axis=0) * 100).round(2)
-    pct.columns = [f"{c} (%)" for c in pct.columns]
+    pct.columns = [f"{c} (%)" for c in pivot.columns]
     return pd.concat([pivot, pct], axis=1).reset_index()
 
-
 # ----------------------------------------------------
-# ✅ ADEUDO parsing from Obs_CC (threshold: < 1500 -> ADEUDO_TRATABLE)
+# ✅ ADEUDO parsing from Obs_CC  (threshold: < $1500 => ADEUDO_TRATABLE)
 # ----------------------------------------------------
 _RE_MONEY = re.compile(
     r"(?i)(?:\$|mxn|pesos|adeudo|deuda)\s*[:\-]?\s*\$?\s*([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)(?:\.[0-9]+)?"
 )
-
 
 def _parse_amount_from_obs(text: str) -> float | None:
     if text is None:
@@ -316,7 +296,6 @@ def _parse_amount_from_obs(text: str) -> float | None:
         return None
     return max(vals)
 
-
 def add_adeudo_tratable(
     df: pd.DataFrame,
     col_result: str | None,
@@ -346,17 +325,12 @@ def add_adeudo_tratable(
 
     return out, adj_col
 
-
 # ----------------------------------------------------
 # ✅ ADD SUPERVISOR COLUMN TO SUMMARY TABLE (Tipificación)
+# - NO "Supervisores_n"
+# - DO show "SIN_SUPERVISOR" (but never show NaN)
 # ----------------------------------------------------
 def attach_supervisor_to_tipificacion_table(tbl: pd.DataFrame, df_src: pd.DataFrame, group_col: str) -> pd.DataFrame:
-    """
-    Adds Supervisor to the aggregated table.
-    - If grouping by Agente -> map Agent -> Supervisor (mode)
-    - If grouping by Campana -> adds Supervisor_top + Supervisores_n
-    - If grouping by Supervisor -> nothing (already the group)
-    """
     if tbl is None or tbl.empty:
         return tbl
     if df_src is None or df_src.empty:
@@ -369,38 +343,29 @@ def attach_supervisor_to_tipificacion_table(tbl: pd.DataFrame, df_src: pd.DataFr
         return tbl
 
     out = tbl.copy()
+    src = df_src.copy()
+
+    # ✅ Normalize supervisor to avoid NaN display but keep SIN_SUPERVISOR
+    src["Supervisor"] = src["Supervisor"].astype(str).replace({"nan": "", "None": ""}).str.strip()
+    src.loc[src["Supervisor"].eq(""), "Supervisor"] = "SIN_SUPERVISOR"
 
     if group_col == "Campana":
-        def _top_mode(x: pd.Series) -> str:
-            x2 = x.dropna()
-            if x2.empty:
-                return "SIN_SUPERVISOR"
-            m = x2.mode()
-            return str(m.iloc[0]) if not m.empty else "SIN_SUPERVISOR"
-
         sup_agg = (
-            df_src.groupby("Campana")["Supervisor"]
+            src.groupby("Campana")["Supervisor"]
             .agg(
-                Supervisor_top=_top_mode,
-                Supervisores_n=lambda x: int(x.dropna().nunique()),
+                Supervisor_top=lambda x: (x.mode().iloc[0] if not x.mode().empty else "SIN_SUPERVISOR"),
             )
             .reset_index()
         )
         out = out.merge(sup_agg, on="Campana", how="left")
-        front = ["Campana", "Supervisor_top", "Supervisores_n"]
+
+        front = ["Campana", "Supervisor_top"]
         rest = [c for c in out.columns if c not in front]
         return out[front + rest]
 
-    def _mode_non_null(x: pd.Series) -> str:
-        x2 = x.dropna()
-        if x2.empty:
-            return "SIN_SUPERVISOR"
-        m = x2.mode()
-        return str(m.iloc[0]) if not m.empty else "SIN_SUPERVISOR"
-
     sup_map = (
-        df_src.groupby(group_col)["Supervisor"]
-        .agg(_mode_non_null)
+        src.groupby(group_col)["Supervisor"]
+        .agg(lambda x: (x.mode().iloc[0] if not x.mode().empty else "SIN_SUPERVISOR"))
         .reset_index()
     )
     out = out.merge(sup_map, on=group_col, how="left")
@@ -409,16 +374,17 @@ def attach_supervisor_to_tipificacion_table(tbl: pd.DataFrame, df_src: pd.DataFr
     rest = [c for c in out.columns if c not in front]
     return out[front + rest]
 
-
 # ----------------------------------------------------
 # UI
 # ----------------------------------------------------
-st.title("📞 Bonsaif Tipificación — GLOS")
+st.title("📞 Bonsaif Tipificación CC2 + JV")
 
-# ✅ GLOS only (with fallback to BONSAIF if you use that section name)
-SOURCE_OPTIONS = {"GLOS": ("BONSAIF_GLOS", "BONSAIF")}
+SOURCE_OPTIONS = {
+    "CC2": ("BONSAIF_CC2", "BONSAIF"),
+    "JV": ("BONSAIF_JV",),
+}
 
-colA, _ = st.columns([1, 2])
+colA, colB = st.columns([1, 2])
 with colA:
     source_label = st.selectbox("Fuente", list(SOURCE_OPTIONS.keys()), index=0)
 
@@ -442,6 +408,12 @@ if "last_query" not in st.session_state:
     st.session_state.last_query = None
 if "last_msg" not in st.session_state:
     st.session_state.last_msg = None
+
+# Excel session state (on-demand)
+if "excel_bytes" not in st.session_state:
+    st.session_state.excel_bytes = None
+if "excel_key" not in st.session_state:
+    st.session_state.excel_key = None
 
 with st.sidebar:
     st.header("Filtros")
@@ -468,6 +440,8 @@ if clear_btn:
     st.session_state.last_ts = None
     st.session_state.last_query = None
     st.session_state.last_msg = None
+    st.session_state.excel_bytes = None
+    st.session_state.excel_key = None
     st.rerun()
 
 current_query = (source_label, d_start, d_end)
@@ -482,7 +456,7 @@ if should_fetch:
 
     all_dfs = []
     msgs = []
-    with st.spinner("Consultando GLOS (todas las campañas)..."):
+    with st.spinner(f"Consultando {source_label} (todas las campañas)..."):
         for c in campaigns:
             camp = c["campana"]
             cid = c["id"]
@@ -530,8 +504,11 @@ col_agent = first_existing_col(df_all, ["Gestor_CC"])
 col_hang = first_existing_col(df_all, ["Colgo_Agente_CC"])
 col_obs = first_existing_col(df_all, ["Obs_CC", "OBS_CC", "Observaciones", "Observacion"])
 
-# ✅ Supervisor rule for GLOS: Calificacion_Int_CC
-col_supervisor_auto = first_existing_col(df_all, ["Calificacion_Int_CC", "Calificacion Int CC", "calificacion_int_cc"])
+# Supervisor rule: CC2 -> Clave_int_cli | JV -> Calificacion_Int_CC
+if source_label == "CC2":
+    col_supervisor_auto = first_existing_col(df_all, ["Clave_int_cli", "Clave Int Cli", "clave_int_cli"])
+else:
+    col_supervisor_auto = first_existing_col(df_all, ["Calificacion_Int_CC", "Calificacion Int CC", "calificacion_int_cc"])
 
 df = df_all.copy()
 
@@ -541,16 +518,15 @@ if col_hang:
 else:
     df["Hangup_Flag"] = False
 
-# ✅ Supervisor unified (SHOW "SIN_SUPERVISOR", DO NOT SHOW "nan")
+# Supervisor unified (avoid NaN display, keep SIN_SUPERVISOR)
 if "Supervisor" not in df.columns:
-    if col_supervisor_auto and col_supervisor_auto in df.columns:
-        df["Supervisor"] = _clean_text_to_na(df[col_supervisor_auto]).fillna("SIN_SUPERVISOR")
+    if col_supervisor_auto:
+        df["Supervisor"] = df[col_supervisor_auto].astype(str).replace({"nan": "", "None": ""}).str.strip()
+        df.loc[df["Supervisor"].eq(""), "Supervisor"] = "SIN_SUPERVISOR"
     else:
         df["Supervisor"] = "SIN_SUPERVISOR"
-else:
-    df["Supervisor"] = _clean_text_to_na(df["Supervisor"]).fillna("SIN_SUPERVISOR")
 
-# Adjusted Código Resultado (adeudo rule: <1500 -> ADEUDO_TRATABLE>)
+# Adjusted Código Resultado (adeudo rule, <1500 => ADEUDO_TRATABLE)
 df, col_result = add_adeudo_tratable(df, col_result_raw, col_obs, threshold=1500.0)
 if not col_result:
     col_result = col_result_raw
@@ -636,6 +612,25 @@ hang_rate = (df_f["Hangup_Flag"].mean() * 100) if len(df_f) else 0
 k4.metric("Agente colgó (%)", f"{hang_rate:,.2f}%")
 
 # ----------------------------------------------------
+# EXCEL KEY (invalidate prepared excel when filters change)
+# ----------------------------------------------------
+excel_key = (
+    source_label,
+    str(d_start),
+    str(d_end),
+    tuple(selected_campaigns),
+    tuple(selected_sup),
+    tuple(selected_agents),
+    tuple(selected_estatus),
+    tuple(selected_results),
+    hang_filter,
+)
+
+if st.session_state.excel_key != excel_key:
+    st.session_state.excel_key = excel_key
+    st.session_state.excel_bytes = None  # invalidate old prepared file
+
+# ----------------------------------------------------
 # TABS
 # ----------------------------------------------------
 tab1, tab2, tab3, tab4 = st.tabs(
@@ -649,12 +644,8 @@ with tab1:
     else:
         g = df_f.groupby([group_col, col_estatus], as_index=False).size().rename(columns={"size": "count"})
         fig = px.bar(
-            g,
-            x=group_col,
-            y="count",
-            color=col_estatus,
-            barmode="stack",
-            title=f"Estatus por {view_mode}",
+            g, x=group_col, y="count", color=col_estatus, barmode="stack",
+            title=f"Estatus por {view_mode}"
         )
         st.plotly_chart(fig, use_container_width=True)
 
@@ -663,18 +654,14 @@ with tab1:
         st.dataframe(tbl, use_container_width=True, height=420)
 
 with tab2:
-    st.markdown("### Análisis por **Código Resultado** (Calificación)")
+    st.markdown("### Análisis por **Código Resultado** (Calificación) ")
     if not col_result:
         st.info("No existe la columna Codigo_Resultado_CC en estos datos.")
     else:
         g = df_f.groupby([group_col, col_result], as_index=False).size().rename(columns={"size": "count"})
         fig = px.bar(
-            g,
-            x=group_col,
-            y="count",
-            color=col_result,
-            barmode="stack",
-            title=f"Código Resultado por {view_mode}",
+            g, x=group_col, y="count", color=col_result, barmode="stack",
+            title=f"Código Resultado por {view_mode}"
         )
         st.plotly_chart(fig, use_container_width=True)
         st.dataframe(make_pct_table(g, group_col, col_result, "count"), use_container_width=True, height=420)
@@ -691,14 +678,35 @@ with tab4:
     st.markdown("### Detalle filtrado")
     st.dataframe(df_f, use_container_width=True, height=520)
 
-    excel_bytes = to_excel_bytes(df_f, sheet_name="detalle_filtrado")
-    st.download_button(
-        "⬇️ Descargar Excel (filtrado)",
-        data=excel_bytes,
-        file_name="bonsaif_m27_GLOS_detalle_filtrado.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
+    # ✅ ON-DEMAND Excel to avoid Streamlit Cloud crashes
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        prepare_excel = st.button("📦 Preparar Excel (on-demand)", use_container_width=True)
+    with c2:
+        clear_excel = st.button("🧹 Limpiar Excel preparado", use_container_width=True)
+
+    if clear_excel:
+        st.session_state.excel_bytes = None
+        st.success("Excel preparado eliminado.")
+        st.rerun()
+
+    if prepare_excel:
+        if len(df_f) > 60000:
+            st.warning("Hay muchos registros. Si tarda o falla, reduce el rango/filters antes de exportar.")
+        with st.spinner("Generando Excel..."):
+            st.session_state.excel_bytes = to_excel_bytes(df_f, sheet_name="detalle_filtrado", max_autofit_rows=200)
+        st.success("Excel listo ✅")
+
+    if st.session_state.excel_bytes:
+        st.download_button(
+            "⬇️ Descargar Excel (filtrado)",
+            data=st.session_state.excel_bytes,
+            file_name=f"bonsaif_m27_{source_label}_detalle_filtrado.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    else:
+        st.info("Para evitar crashes, el Excel se genera **solo** cuando presionas **Preparar Excel**.")
 
 if st.session_state.last_msg:
     with st.expander("Mensajes del API (por campaña)"):
