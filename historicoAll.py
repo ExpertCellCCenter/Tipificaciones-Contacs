@@ -807,8 +807,31 @@ with tab3:
             st.dataframe(make_pct_table(g_h, group_col, col_result, "count"), width="stretch", height=420)
 
 with tab4:
+    # ✅ ONLY CHANGE: Detalle + Excel shows/exports ONLY these columns (in this order)
+    detail_specs = [
+        ("Campaña_CC", ["Campaña_CC", "Campana_CC", "Campana"]),
+        ("Fecha_CC", ["Fecha_CC"]),
+        ("Tel_Marcado_CC", ["Tel_Marcado_CC", "tel", "telefono", "Telefono", "Telefono_CC"]),
+        ("duracion(seg)_CC", ["duracion(seg)_CC", "Duracion_CC", "Duracion_Seg_CC", "duracion_cc"]),
+        ("Duracion_Min_CC", ["Duracion_Min_CC", "Duración_Min_CC"]),
+        ("Estatus_CC", ["Estatus_CC", "Estatus"]),
+        ("Codigo_Resultado_CC", ["Codigo_Resultado_CC", "Calificacion_CC", "Calificacion", "Calificacion_Int_CC", "Clave_int_cli"]),
+        ("Codigo_Resultado_Ajustado", ["Codigo_Resultado_Ajustado"]),
+        ("Fecha_CC", ["Fecha_CC", "Fecha", "fecha", "fecha_cc"]),
+        ("Obs_CC", ["Obs_CC", "OBS_CC", "Observaciones", "Observacion"]),
+        ("Colgo_Agente_CC", ["Colgo_Agente_CC", "Colgo Agente CC", "Colgo_Agente"]),
+    ]
+
+    df_detalle = pd.DataFrame(index=df_f.index)
+    for out_name, cands in detail_specs:
+        col_found = first_existing_col(df_f, cands)
+        if col_found and col_found in df_f.columns:
+            df_detalle[out_name] = df_f[col_found]
+        else:
+            df_detalle[out_name] = pd.NA
+
     st.markdown("### Detalle filtrado")
-    st.dataframe(df_f, width="stretch", height=520)
+    st.dataframe(df_detalle, width="stretch", height=520)
 
     c1, c2 = st.columns([1, 1])
     with c1:
@@ -825,7 +848,7 @@ with tab4:
         if len(df_f) > 60000:
             st.warning("Hay muchos registros. Si tarda o falla, reduce el rango/filters antes de exportar.")
         with st.spinner("Generando Excel..."):
-            st.session_state.excel_bytes = to_excel_bytes(df_f, sheet_name="detalle_filtrado", max_autofit_rows=200)
+            st.session_state.excel_bytes = to_excel_bytes(df_detalle, sheet_name="detalle_filtrado", max_autofit_rows=200)
         st.success("Excel listo ✅")
 
     if st.session_state.excel_bytes:
