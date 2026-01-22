@@ -386,36 +386,15 @@ SOURCE_OPTIONS = {
 
 colA, colB = st.columns([1, 2])
 with colA:
-    selected_sources = st.multiselect("Fuente", list(SOURCE_OPTIONS.keys()), default=["CC2"])
+    source_label = st.selectbox("Fuente", list(SOURCE_OPTIONS.keys()), index=0)
 
-if not selected_sources:
-    st.warning("Selecciona al menos una fuente (CC2 y/o JV).")
-    st.stop()
-
-source_key = tuple(sorted(selected_sources))
-source_label = "+".join(source_key)  # for display / filenames
-
-# Load cfg/campaigns for ALL selected sources
-cfg_map = {}
-campaigns_map = {}
-default_starts = []
-default_ends = []
+section_name = _get_section(*SOURCE_OPTIONS[source_label])
 
 try:
-    for src in selected_sources:
-        section_name_i = _get_section(*SOURCE_OPTIONS[src])
-        cfg_i, ds_i, de_i, campaigns_i = load_bonsaif_section(section_name_i)
-        cfg_map[src] = cfg_i
-        campaigns_map[src] = campaigns_i
-        default_starts.append(ds_i)
-        default_ends.append(de_i)
+    cfg, default_start, default_end, campaigns = load_bonsaif_section(section_name)
 except Exception as e:
     st.error(str(e))
     st.stop()
-
-default_start = min(default_starts) if default_starts else date.today()
-default_end = max(default_ends) if default_ends else date.today()
-auto_fetch_any = any(bool(cfg_map[s].get("AUTO_FETCH", True)) for s in selected_sources)
 
 today = date.today()
 oldest_allowed = today - timedelta(days=92)
@@ -465,9 +444,9 @@ if clear_btn:
     st.session_state.excel_key = None
     st.rerun()
 
-current_query = (source_key, d_start, d_end)
+current_query = (source_label, d_start, d_end)
 dates_changed = st.session_state.last_query != current_query
-should_fetch = run_btn or (auto_fetch_any and (st.session_state.last_ts is None or dates_changed))
+should_fetch = run_btn or (cfg["AUTO_FETCH"] and (st.session_state.last_ts is None or dates_changed))
 
 if should_fetch:
     ok, err = validate_api_window(d_start, d_end)
@@ -478,53 +457,30 @@ if should_fetch:
     all_dfs = []
     msgs = []
     with st.spinner(f"Consultando {source_label} (todas las campañas)..."):
-        for src in selected_sources:
-            cfg = cfg_map[src]
-            campaigns = campaigns_map[src]
-
-            for c in campaigns:
-                camp = c["campana"]
-                cid = c["id"]
-                try:
-                    df_i, msg_i = fetch_campaign(
-                        base_url=cfg["BASE_URL"],
-                        service=cfg["SERVICE"],
-                        method=cfg["METHOD"],
-                        key=cfg["KEY"],
-                        sys=cfg["SYS"],
-                        fechaini=str(d_start),
-                        fechafin=str(d_end),
-                        campana=camp,
-                        campana_id=cid,
-                    )
-                    if not df_i.empty:
-                        df_i = df_i.copy()
-                        df_i["Campana"] = camp
-                        df_i["Campana_ID"] = cid
-                        df_i["Fuente"] = src
-
-                        # ✅ Create Supervisor per-source so CC2/JV can coexist
-                        if "Supervisor" not in df_i.columns:
-                            if src == "CC2":
-                                col_sup = first_existing_col(df_i, ["Clave_int_cli", "Clave Int Cli", "clave_int_cli"])
-                            else:
-                                col_sup = first_existing_col(df_i, ["Calificacion_Int_CC", "Calificacion Int CC", "calificacion_int_cc"])
-
-                            if col_sup:
-                                df_i["Supervisor"] = df_i[col_sup].astype(str).replace({"nan": "", "None": ""}).str.strip()
-                                df_i.loc[df_i["Supervisor"].eq(""), "Supervisor"] = "SIN_SUPERVISOR"
-                            else:
-                                df_i["Supervisor"] = "SIN_SUPERVISOR"
-                        else:
-                            df_i["Supervisor"] = df_i["Supervisor"].astype(str).replace({"nan": "", "None": ""}).str.strip()
-                            df_i.loc[df_i["Supervisor"].eq(""), "Supervisor"] = "SIN_SUPERVISOR"
-
-                        all_dfs.append(df_i)
-
-                    if msg_i:
-                        msgs.append(f"{src} | {camp} (ID {cid}): {msg_i}")
-                except Exception as e:
-                    msgs.append(f"{src} | {camp} (ID {cid}): ERROR -> {e}")
+        for c in campaigns:
+            camp = c["campana"]
+            cid = c["id"]
+            try:
+                df_i, msg_i = fetch_campaign(
+                    base_url=cfg["BASE_URL"],
+                    service=cfg["SERVICE"],
+                    method=cfg["METHOD"],
+                    key=cfg["KEY"],
+                    sys=cfg["SYS"],
+                    fechaini=str(d_start),
+                    fechafin=str(d_end),
+                    campana=camp,
+                    campana_id=cid,
+                )
+                if not df_i.empty:
+                    df_i = df_i.copy()
+                    df_i["Campana"] = camp
+                    df_i["Campana_ID"] = cid
+                    all_dfs.append(df_i)
+                if msg_i:
+                    msgs.append(f"{camp} (ID {cid}): {msg_i}")
+            except Exception as e:
+                msgs.append(f"{camp} (ID {cid}): ERROR -> {e}")
 
     df_all = pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
     st.session_state.df_all = df_all
@@ -549,12 +505,10 @@ col_hang = first_existing_col(df_all, ["Colgo_Agente_CC"])
 col_obs = first_existing_col(df_all, ["Obs_CC", "OBS_CC", "Observaciones", "Observacion"])
 
 # Supervisor rule: CC2 -> Clave_int_cli | JV -> Calificacion_Int_CC
-if len(source_key) == 1 and source_key[0] == "CC2":
+if source_label == "CC2":
     col_supervisor_auto = first_existing_col(df_all, ["Clave_int_cli", "Clave Int Cli", "clave_int_cli"])
-elif len(source_key) == 1 and source_key[0] == "JV":
-    col_supervisor_auto = first_existing_col(df_all, ["Calificacion_Int_CC", "Calificacion Int CC", "calificacion_int_cc"])
 else:
-    col_supervisor_auto = None
+    col_supervisor_auto = first_existing_col(df_all, ["Calificacion_Int_CC", "Calificacion Int CC", "calificacion_int_cc"])
 
 df = df_all.copy()
 
@@ -576,6 +530,49 @@ if "Supervisor" not in df.columns:
 df, col_result = add_adeudo_tratable(df, col_result_raw, col_obs, threshold=1500.0)
 if not col_result:
     col_result = col_result_raw
+
+# ✅ Normalize empty Tipificacion/Subtificacion labels so filters + plots show "Sin Tipificacion"
+if col_estatus and col_estatus in df.columns:
+    df[col_estatus] = (
+        df[col_estatus]
+        .astype("string")
+        .str.strip()
+        .replace(
+            {
+                "": pd.NA,
+                "nan": pd.NA,
+                "NaN": pd.NA,
+                "None": pd.NA,
+                "NULL": pd.NA,
+                "null": pd.NA,
+                "N/A": pd.NA,
+                "n/a": pd.NA,
+            }
+        )
+        .fillna("Sin Tipificacion")
+        .astype(str)
+    )
+
+if col_result and col_result in df.columns:
+    df[col_result] = (
+        df[col_result]
+        .astype("string")
+        .str.strip()
+        .replace(
+            {
+                "": pd.NA,
+                "nan": pd.NA,
+                "NaN": pd.NA,
+                "None": pd.NA,
+                "NULL": pd.NA,
+                "null": pd.NA,
+                "N/A": pd.NA,
+                "n/a": pd.NA,
+            }
+        )
+        .fillna("Sin Tipificacion")
+        .astype(str)
+    )
 
 # ----------------------------------------------------
 # FILTERS
@@ -661,7 +658,7 @@ k4.metric("Agente colgó (%)", f"{hang_rate:,.2f}%")
 # EXCEL KEY (invalidate prepared excel when filters change)
 # ----------------------------------------------------
 excel_key = (
-    source_key,
+    source_label,
     str(d_start),
     str(d_end),
     tuple(selected_campaigns),
