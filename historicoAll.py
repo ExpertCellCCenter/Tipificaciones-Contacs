@@ -386,15 +386,36 @@ SOURCE_OPTIONS = {
 
 colA, colB = st.columns([1, 2])
 with colA:
-    source_label = st.selectbox("Fuente", list(SOURCE_OPTIONS.keys()), index=0)
+    selected_sources = st.multiselect("Fuente", list(SOURCE_OPTIONS.keys()), default=["CC2"])
 
-section_name = _get_section(*SOURCE_OPTIONS[source_label])
+if not selected_sources:
+    st.warning("Selecciona al menos una fuente (CC2 y/o JV).")
+    st.stop()
+
+source_key = tuple(sorted(selected_sources))
+source_label = "+".join(source_key)  # for display / filenames
+
+# Load cfg/campaigns for ALL selected sources
+cfg_map = {}
+campaigns_map = {}
+default_starts = []
+default_ends = []
 
 try:
-    cfg, default_start, default_end, campaigns = load_bonsaif_section(section_name)
+    for src in selected_sources:
+        section_name_i = _get_section(*SOURCE_OPTIONS[src])
+        cfg_i, ds_i, de_i, campaigns_i = load_bonsaif_section(section_name_i)
+        cfg_map[src] = cfg_i
+        campaigns_map[src] = campaigns_i
+        default_starts.append(ds_i)
+        default_ends.append(de_i)
 except Exception as e:
     st.error(str(e))
     st.stop()
+
+default_start = min(default_starts) if default_starts else date.today()
+default_end = max(default_ends) if default_ends else date.today()
+auto_fetch_any = any(bool(cfg_map[s].get("AUTO_FETCH", True)) for s in selected_sources)
 
 today = date.today()
 oldest_allowed = today - timedelta(days=92)
@@ -444,9 +465,9 @@ if clear_btn:
     st.session_state.excel_key = None
     st.rerun()
 
-current_query = (source_label, d_start, d_end)
+current_query = (source_key, d_start, d_end)
 dates_changed = st.session_state.last_query != current_query
-should_fetch = run_btn or (cfg["AUTO_FETCH"] and (st.session_state.last_ts is None or dates_changed))
+should_fetch = run_btn or (auto_fetch_any and (st.session_state.last_ts is None or dates_changed))
 
 if should_fetch:
     ok, err = validate_api_window(d_start, d_end)
@@ -457,30 +478,53 @@ if should_fetch:
     all_dfs = []
     msgs = []
     with st.spinner(f"Consultando {source_label} (todas las campañas)..."):
-        for c in campaigns:
-            camp = c["campana"]
-            cid = c["id"]
-            try:
-                df_i, msg_i = fetch_campaign(
-                    base_url=cfg["BASE_URL"],
-                    service=cfg["SERVICE"],
-                    method=cfg["METHOD"],
-                    key=cfg["KEY"],
-                    sys=cfg["SYS"],
-                    fechaini=str(d_start),
-                    fechafin=str(d_end),
-                    campana=camp,
-                    campana_id=cid,
-                )
-                if not df_i.empty:
-                    df_i = df_i.copy()
-                    df_i["Campana"] = camp
-                    df_i["Campana_ID"] = cid
-                    all_dfs.append(df_i)
-                if msg_i:
-                    msgs.append(f"{camp} (ID {cid}): {msg_i}")
-            except Exception as e:
-                msgs.append(f"{camp} (ID {cid}): ERROR -> {e}")
+        for src in selected_sources:
+            cfg = cfg_map[src]
+            campaigns = campaigns_map[src]
+
+            for c in campaigns:
+                camp = c["campana"]
+                cid = c["id"]
+                try:
+                    df_i, msg_i = fetch_campaign(
+                        base_url=cfg["BASE_URL"],
+                        service=cfg["SERVICE"],
+                        method=cfg["METHOD"],
+                        key=cfg["KEY"],
+                        sys=cfg["SYS"],
+                        fechaini=str(d_start),
+                        fechafin=str(d_end),
+                        campana=camp,
+                        campana_id=cid,
+                    )
+                    if not df_i.empty:
+                        df_i = df_i.copy()
+                        df_i["Campana"] = camp
+                        df_i["Campana_ID"] = cid
+                        df_i["Fuente"] = src
+
+                        # ✅ Create Supervisor per-source so CC2/JV can coexist
+                        if "Supervisor" not in df_i.columns:
+                            if src == "CC2":
+                                col_sup = first_existing_col(df_i, ["Clave_int_cli", "Clave Int Cli", "clave_int_cli"])
+                            else:
+                                col_sup = first_existing_col(df_i, ["Calificacion_Int_CC", "Calificacion Int CC", "calificacion_int_cc"])
+
+                            if col_sup:
+                                df_i["Supervisor"] = df_i[col_sup].astype(str).replace({"nan": "", "None": ""}).str.strip()
+                                df_i.loc[df_i["Supervisor"].eq(""), "Supervisor"] = "SIN_SUPERVISOR"
+                            else:
+                                df_i["Supervisor"] = "SIN_SUPERVISOR"
+                        else:
+                            df_i["Supervisor"] = df_i["Supervisor"].astype(str).replace({"nan": "", "None": ""}).str.strip()
+                            df_i.loc[df_i["Supervisor"].eq(""), "Supervisor"] = "SIN_SUPERVISOR"
+
+                        all_dfs.append(df_i)
+
+                    if msg_i:
+                        msgs.append(f"{src} | {camp} (ID {cid}): {msg_i}")
+                except Exception as e:
+                    msgs.append(f"{src} | {camp} (ID {cid}): ERROR -> {e}")
 
     df_all = pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
     st.session_state.df_all = df_all
@@ -505,10 +549,12 @@ col_hang = first_existing_col(df_all, ["Colgo_Agente_CC"])
 col_obs = first_existing_col(df_all, ["Obs_CC", "OBS_CC", "Observaciones", "Observacion"])
 
 # Supervisor rule: CC2 -> Clave_int_cli | JV -> Calificacion_Int_CC
-if source_label == "CC2":
+if len(source_key) == 1 and source_key[0] == "CC2":
     col_supervisor_auto = first_existing_col(df_all, ["Clave_int_cli", "Clave Int Cli", "clave_int_cli"])
-else:
+elif len(source_key) == 1 and source_key[0] == "JV":
     col_supervisor_auto = first_existing_col(df_all, ["Calificacion_Int_CC", "Calificacion Int CC", "calificacion_int_cc"])
+else:
+    col_supervisor_auto = None
 
 df = df_all.copy()
 
@@ -548,7 +594,7 @@ with st.sidebar:
     selected_agents = st.multiselect("Agente (uno o varios)", agent_opts, default=agent_opts)
 
     estatus_opts = sorted(df[col_estatus].dropna().astype(str).unique().tolist()) if col_estatus else []
-    selected_estatus = st.multiselect("Estatus (uno o varios)", estatus_opts, default=estatus_opts)
+    selected_estatus = st.multiselect("Tipificacion (uno o varios)", estatus_opts, default=estatus_opts)
 
     # Dependent options for Código Resultado
     pre_filters = {}
@@ -563,7 +609,7 @@ with st.sidebar:
     df_for_results = apply_filters(df, pre_filters)
     result_opts = sorted(df_for_results[col_result].dropna().astype(str).unique().tolist()) if col_result else []
     selected_results = st.multiselect(
-        "Calificación (Código Resultado) — depende del Estatus",
+        "Subtificación (Código Resultado) — depende de la Tipificacion",
         result_opts,
         default=result_opts,
     )
@@ -606,8 +652,8 @@ st.subheader("📊 KPIs (con filtros actuales)")
 k1, k2, k3, k4 = st.columns(4)
 
 k1.metric("Llamadas", f"{len(df_f):,}")
-k2.metric("Estatus únicos", f"{df_f[col_estatus].nunique():,}" if col_estatus else "-")
-k3.metric("Códigos resultado únicos", f"{df_f[col_result].nunique():,}" if col_result else "-")
+k2.metric("Tipificaciones únicas", f"{df_f[col_estatus].nunique():,}" if col_estatus else "-")
+k3.metric("Subtificaciones únicas", f"{df_f[col_result].nunique():,}" if col_result else "-")
 hang_rate = (df_f["Hangup_Flag"].mean() * 100) if len(df_f) else 0
 k4.metric("Agente colgó (%)", f"{hang_rate:,.2f}%")
 
@@ -615,7 +661,7 @@ k4.metric("Agente colgó (%)", f"{hang_rate:,.2f}%")
 # EXCEL KEY (invalidate prepared excel when filters change)
 # ----------------------------------------------------
 excel_key = (
-    source_label,
+    source_key,
     str(d_start),
     str(d_end),
     tuple(selected_campaigns),
@@ -633,19 +679,20 @@ if st.session_state.excel_key != excel_key:
 # ----------------------------------------------------
 # TABS
 # ----------------------------------------------------
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["Tipificación (Estatus)", "Calificación (Código Resultado)", "Agente colgó", "Detalle + Excel"]
+tab1, tab3, tab4 = st.tabs(
+    ["Tipificacion", "Agente colgó", "Detalle + Excel"]
 )
 
 with tab1:
-    st.markdown("### Tipificación por **Estatus** (ajustada a filtros)")
+    st.markdown("### Tipificación por **Tipificacion** (ajustada a filtros)")
     if not col_estatus:
-        st.info("No existe la columna Estatus_CC en estos datos.")
+        st.info("No existe la columna Estatus_CC (Tipificacion) en estos datos.")
     else:
         g = df_f.groupby([group_col, col_estatus], as_index=False).size().rename(columns={"size": "count"})
         fig = px.bar(
             g, x=group_col, y="count", color=col_estatus, barmode="stack",
-            title=f"Estatus por {view_mode}"
+            title=f"Tipificacion por {view_mode}",
+            labels={col_estatus: "Tipificacion"},
         )
         st.plotly_chart(fig, use_container_width=True)
 
@@ -653,18 +700,19 @@ with tab1:
         tbl = attach_supervisor_to_tipificacion_table(tbl, df_f, group_col)
         st.dataframe(tbl, use_container_width=True, height=420)
 
-with tab2:
-    st.markdown("### Análisis por **Código Resultado** (Calificación) ")
-    if not col_result:
-        st.info("No existe la columna Codigo_Resultado_CC en estos datos.")
-    else:
-        g = df_f.groupby([group_col, col_result], as_index=False).size().rename(columns={"size": "count"})
-        fig = px.bar(
-            g, x=group_col, y="count", color=col_result, barmode="stack",
-            title=f"Código Resultado por {view_mode}"
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(make_pct_table(g, group_col, col_result, "count"), use_container_width=True, height=420)
+        # ✅ Subtificación correspondiente (MOVED HERE, and tab removed)
+        st.markdown("### Subtificación correspondiente (Código Resultado) — ajustada a filtros")
+        if not col_result:
+            st.info("No existe la columna Codigo_Resultado_CC (Subtificación) en estos datos.")
+        else:
+            g2 = df_f.groupby([group_col, col_result], as_index=False).size().rename(columns={"size": "count"})
+            fig2 = px.bar(
+                g2, x=group_col, y="count", color=col_result, barmode="stack",
+                title=f"Subtificación por {view_mode}",
+                labels={col_result: "Subtificación"},
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+            st.dataframe(make_pct_table(g2, group_col, col_result, "count"), use_container_width=True, height=420)
 
 with tab3:
     st.markdown("### **Agente colgó** (conteo y %), ajustado a filtros")
@@ -673,6 +721,28 @@ with tab3:
     fig = px.bar(g, x=group_col, y="pct_colgo", title=f"% Agente colgó por {view_mode}")
     st.plotly_chart(fig, use_container_width=True)
     st.dataframe(g.sort_values("pct_colgo", ascending=False), use_container_width=True, height=420)
+
+    # ✅ Subtificación de SOLO llamadas colgadas (plot + tabla)
+    st.markdown("### Subtificación de **llamadas colgadas** (ajustada a filtros)")
+    if not col_result:
+        st.info("No existe la columna Codigo_Resultado_CC (Subtificación) en estos datos.")
+    else:
+        df_h = df_f[df_f["Hangup_Flag"] == True]
+        if df_h.empty:
+            st.info("No hay llamadas colgadas con los filtros actuales.")
+        else:
+            g_h = df_h.groupby([group_col, col_result], as_index=False).size().rename(columns={"size": "count"})
+            fig_h = px.bar(
+                g_h,
+                x=group_col,
+                y="count",
+                color=col_result,
+                barmode="stack",
+                title=f"Subtificación (solo colgadas) por {view_mode}",
+                labels={col_result: "Subtificación"},
+            )
+            st.plotly_chart(fig_h, use_container_width=True)
+            st.dataframe(make_pct_table(g_h, group_col, col_result, "count"), use_container_width=True, height=420)
 
 with tab4:
     st.markdown("### Detalle filtrado")
