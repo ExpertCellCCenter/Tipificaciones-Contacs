@@ -31,11 +31,13 @@ st.set_page_config(
 def _strip_accents(s: str) -> str:
     return "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
 
+
 def _norm_colname(s: str) -> str:
     s = str(s).strip()
     s = _strip_accents(s)
     s = s.replace(" ", "_")
     return s.lower()
+
 
 def first_existing_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
     if df is None or df.empty:
@@ -47,6 +49,7 @@ def first_existing_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
         if key in norm_map:
             return norm_map[key]
     return None
+
 
 def _pick_records_from_payload(payload):
     if payload is None:
@@ -63,6 +66,7 @@ def _pick_records_from_payload(payload):
                 return v
     return []
 
+
 def _payload_message(payload):
     if payload is None:
         return None
@@ -73,6 +77,7 @@ def _payload_message(payload):
             if k in payload and isinstance(payload[k], str) and payload[k].strip():
                 return payload[k].strip()
     return None
+
 
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -98,6 +103,7 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+
 def to_excel_bytes(df: pd.DataFrame, sheet_name="m27", max_autofit_rows: int = 200) -> bytes:
     """
     Safer Excel export to avoid Streamlit Cloud crashes:
@@ -120,10 +126,8 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name="m27", max_autofit_rows: int = 2
     sample_last_row = min(ws.max_row, 1 + max_autofit_rows)  # row 1 is header
     for col_idx in range(1, ws.max_column + 1):
         max_len = 10  # minimum baseline
-        # header
         hv = ws.cell(row=1, column=col_idx).value
         max_len = max(max_len, len("" if hv is None else str(hv)))
-        # sample rows
         for row in range(2, sample_last_row + 1):
             v = ws.cell(row=row, column=col_idx).value
             max_len = max(max_len, len("" if v is None else str(v)))
@@ -134,8 +138,10 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name="m27", max_autofit_rows: int = 2
     out2.seek(0)
     return out2.read()
 
+
 def parse_date_yyyy_mm_dd(s: str) -> date:
     return datetime.strptime(s.strip(), "%Y-%m-%d").date()
+
 
 def validate_api_window(d_start: date, d_end: date):
     if d_end < d_start:
@@ -148,11 +154,13 @@ def validate_api_window(d_start: date, d_end: date):
         return False, "La fecha inicial no puede ser anterior a ~3 meses desde hoy (restricción del API)."
     return True, None
 
+
 def _get_section(*names: str) -> str:
     for n in names:
         if n in st.secrets:
             return n
     raise RuntimeError(f"No encontré ninguna sección en secrets.toml: {names}")
+
 
 def load_bonsaif_section(section_name: str):
     s = st.secrets[section_name]
@@ -186,7 +194,6 @@ def load_bonsaif_section(section_name: str):
     if not campaigns:
         raise RuntimeError(f"{section_name}: no hay campañas válidas en CAMPAIGNS")
 
-    # ✅ DEFAULT DATE RANGE: first day of current month -> today (clamped to oldest_allowed)
     today = date.today()
     oldest_allowed = today - timedelta(days=92)
     month_start = date(today.year, today.month, 1)
@@ -198,9 +205,19 @@ def load_bonsaif_section(section_name: str):
 
     return cfg, default_start, default_end, campaigns
 
+
 @st.cache_data(show_spinner=False, ttl=300)
-def fetch_campaign(base_url: str, service: str, method: str, key: str, sys: str,
-                   fechaini: str, fechafin: str, campana: str, campana_id: str):
+def fetch_campaign(
+    base_url: str,
+    service: str,
+    method: str,
+    key: str,
+    sys: str,
+    fechaini: str,
+    fechafin: str,
+    campana: str,
+    campana_id: str,
+):
     params = {
         "service": service,
         "m": method,
@@ -226,9 +243,11 @@ def fetch_campaign(base_url: str, service: str, method: str, key: str, sys: str,
     df = normalize_df(df)
     return df, msg
 
+
 def compute_hangup_flag(series: pd.Series) -> pd.Series:
     s = series.astype(str).str.strip().str.lower()
     return s.isin(["si", "s", "1", "true", "yes", "y"])
+
 
 def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
     out = df.copy()
@@ -239,10 +258,10 @@ def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
             out = out[out[colname].astype(str).isin([str(x) for x in selected])]
     return out
 
+
 def make_pct_table(grouped: pd.DataFrame, group_col: str, cat_col: str, value_col: str = "count") -> pd.DataFrame:
     pivot = grouped.pivot_table(index=group_col, columns=cat_col, values=value_col, aggfunc="sum", fill_value=0)
 
-    # ✅ ONLY CHANGE: rename blank/NaN headers to "Sin Tipificacion" (and merge if duplicates)
     new_cols = []
     for c in pivot.columns:
         s = "" if c is None else str(c).strip()
@@ -259,12 +278,14 @@ def make_pct_table(grouped: pd.DataFrame, group_col: str, cat_col: str, value_co
     pct.columns = [f"{c} (%)" for c in pivot.columns]
     return pd.concat([pivot, pct], axis=1).reset_index()
 
+
 # ----------------------------------------------------
 # ✅ ADEUDO parsing from Obs_CC  (threshold: < $1500 => ADEUDO_TRATABLE)
 # ----------------------------------------------------
 _RE_MONEY = re.compile(
     r"(?i)(?:\$|mxn|pesos|adeudo|deuda)\s*[:\-]?\s*\$?\s*([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)(?:\.[0-9]+)?"
 )
+
 
 def _parse_amount_from_obs(text: str) -> float | None:
     if text is None:
@@ -296,6 +317,7 @@ def _parse_amount_from_obs(text: str) -> float | None:
         return None
     return max(vals)
 
+
 def add_adeudo_tratable(
     df: pd.DataFrame,
     col_result: str | None,
@@ -325,6 +347,7 @@ def add_adeudo_tratable(
 
     return out, adj_col
 
+
 # ----------------------------------------------------
 # ✅ ADD SUPERVISOR COLUMN TO SUMMARY TABLE (Tipificación)
 # - NO "Supervisores_n"
@@ -345,16 +368,13 @@ def attach_supervisor_to_tipificacion_table(tbl: pd.DataFrame, df_src: pd.DataFr
     out = tbl.copy()
     src = df_src.copy()
 
-    # ✅ Normalize supervisor to avoid NaN display but keep SIN_SUPERVISOR
     src["Supervisor"] = src["Supervisor"].astype(str).replace({"nan": "", "None": ""}).str.strip()
     src.loc[src["Supervisor"].eq(""), "Supervisor"] = "SIN_SUPERVISOR"
 
     if group_col == "Campana":
         sup_agg = (
             src.groupby("Campana")["Supervisor"]
-            .agg(
-                Supervisor_top=lambda x: (x.mode().iloc[0] if not x.mode().empty else "SIN_SUPERVISOR"),
-            )
+            .agg(Supervisor_top=lambda x: (x.mode().iloc[0] if not x.mode().empty else "SIN_SUPERVISOR"))
             .reset_index()
         )
         out = out.merge(sup_agg, on="Campana", how="left")
@@ -374,6 +394,7 @@ def attach_supervisor_to_tipificacion_table(tbl: pd.DataFrame, df_src: pd.DataFr
     rest = [c for c in out.columns if c not in front]
     return out[front + rest]
 
+
 # ----------------------------------------------------
 # UI
 # ----------------------------------------------------
@@ -386,15 +407,41 @@ SOURCE_OPTIONS = {
 
 colA, colB = st.columns([1, 2])
 with colA:
-    source_label = st.selectbox("Fuente", list(SOURCE_OPTIONS.keys()), index=0)
+    selected_sources = st.multiselect(
+        "Fuentes",
+        list(SOURCE_OPTIONS.keys()),
+        default=list(SOURCE_OPTIONS.keys()),
+    )
 
-section_name = _get_section(*SOURCE_OPTIONS[source_label])
+if not selected_sources:
+    st.warning("Selecciona al menos una fuente (CC2 y/o JV).")
+    st.stop()
+
+selected_sources = list(dict.fromkeys(selected_sources))  # stable order, no duplicates
+sources_tag = "_".join(selected_sources)
+
+# Load configs for selected sources
+cfg_by_source: dict[str, dict] = {}
+campaigns_by_source: dict[str, list[dict]] = {}
+defaults_start: list[date] = []
+defaults_end: list[date] = []
+auto_fetch_any = False
 
 try:
-    cfg, default_start, default_end, campaigns = load_bonsaif_section(section_name)
+    for src in selected_sources:
+        section_name = _get_section(*SOURCE_OPTIONS[src])
+        cfg_i, ds_i, de_i, camps_i = load_bonsaif_section(section_name)
+        cfg_by_source[src] = cfg_i
+        campaigns_by_source[src] = camps_i
+        defaults_start.append(ds_i)
+        defaults_end.append(de_i)
+        auto_fetch_any = auto_fetch_any or bool(cfg_i.get("AUTO_FETCH", True))
 except Exception as e:
     st.error(str(e))
     st.stop()
+
+default_start = min(defaults_start) if defaults_start else date.today()
+default_end = max(defaults_end) if defaults_end else date.today()
 
 today = date.today()
 oldest_allowed = today - timedelta(days=92)
@@ -420,7 +467,7 @@ with st.sidebar:
 
     dr = st.date_input(
         "Rango de fechas (máx 31 días, ~3 meses atrás)",
-        value=(default_start, default_end),
+        value=(max(default_start, oldest_allowed), min(default_end, today)),
         min_value=oldest_allowed,
         max_value=today,
     )
@@ -432,8 +479,8 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("Acciones")
-    run_btn = st.button("🔄 Actualizar", use_container_width=True)
-    clear_btn = st.button("🧹 Limpiar", use_container_width=True)
+    run_btn = st.button("🔄 Actualizar", width="stretch")
+    clear_btn = st.button("🧹 Limpiar", width="stretch")
 
 if clear_btn:
     st.session_state.df_all = pd.DataFrame()
@@ -444,9 +491,9 @@ if clear_btn:
     st.session_state.excel_key = None
     st.rerun()
 
-current_query = (source_label, d_start, d_end)
+current_query = (tuple(selected_sources), d_start, d_end)
 dates_changed = st.session_state.last_query != current_query
-should_fetch = run_btn or (cfg["AUTO_FETCH"] and (st.session_state.last_ts is None or dates_changed))
+should_fetch = run_btn or (auto_fetch_any and (st.session_state.last_ts is None or dates_changed))
 
 if should_fetch:
     ok, err = validate_api_window(d_start, d_end)
@@ -456,31 +503,35 @@ if should_fetch:
 
     all_dfs = []
     msgs = []
-    with st.spinner(f"Consultando {source_label} (todas las campañas)..."):
-        for c in campaigns:
-            camp = c["campana"]
-            cid = c["id"]
-            try:
-                df_i, msg_i = fetch_campaign(
-                    base_url=cfg["BASE_URL"],
-                    service=cfg["SERVICE"],
-                    method=cfg["METHOD"],
-                    key=cfg["KEY"],
-                    sys=cfg["SYS"],
-                    fechaini=str(d_start),
-                    fechafin=str(d_end),
-                    campana=camp,
-                    campana_id=cid,
-                )
-                if not df_i.empty:
-                    df_i = df_i.copy()
-                    df_i["Campana"] = camp
-                    df_i["Campana_ID"] = cid
-                    all_dfs.append(df_i)
-                if msg_i:
-                    msgs.append(f"{camp} (ID {cid}): {msg_i}")
-            except Exception as e:
-                msgs.append(f"{camp} (ID {cid}): ERROR -> {e}")
+    with st.spinner(f"Consultando {sources_tag} (todas las campañas)..."):
+        for src in selected_sources:
+            cfg = cfg_by_source[src]
+            campaigns = campaigns_by_source[src]
+            for c in campaigns:
+                camp = c["campana"]
+                cid = c["id"]
+                try:
+                    df_i, msg_i = fetch_campaign(
+                        base_url=cfg["BASE_URL"],
+                        service=cfg["SERVICE"],
+                        method=cfg["METHOD"],
+                        key=cfg["KEY"],
+                        sys=cfg["SYS"],
+                        fechaini=str(d_start),
+                        fechafin=str(d_end),
+                        campana=camp,
+                        campana_id=cid,
+                    )
+                    if not df_i.empty:
+                        df_i = df_i.copy()
+                        df_i["Campana"] = camp
+                        df_i["Campana_ID"] = cid
+                        df_i["Fuente"] = src
+                        all_dfs.append(df_i)
+                    if msg_i:
+                        msgs.append(f"[{src}] {camp} (ID {cid}): {msg_i}")
+                except Exception as e:
+                    msgs.append(f"[{src}] {camp} (ID {cid}): ERROR -> {e}")
 
     df_all = pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
     st.session_state.df_all = df_all
@@ -504,11 +555,9 @@ col_agent = first_existing_col(df_all, ["Gestor_CC"])
 col_hang = first_existing_col(df_all, ["Colgo_Agente_CC"])
 col_obs = first_existing_col(df_all, ["Obs_CC", "OBS_CC", "Observaciones", "Observacion"])
 
-# Supervisor rule: CC2 -> Clave_int_cli | JV -> Calificacion_Int_CC
-if source_label == "CC2":
-    col_supervisor_auto = first_existing_col(df_all, ["Clave_int_cli", "Clave Int Cli", "clave_int_cli"])
-else:
-    col_supervisor_auto = first_existing_col(df_all, ["Calificacion_Int_CC", "Calificacion Int CC", "calificacion_int_cc"])
+# Supervisor cols (CC2 / JV)
+col_supervisor_cc2 = first_existing_col(df_all, ["Clave_int_cli", "Clave Int Cli", "clave_int_cli"])
+col_supervisor_jv = first_existing_col(df_all, ["Calificacion_Int_CC", "Calificacion Int CC", "calificacion_int_cc"])
 
 df = df_all.copy()
 
@@ -520,11 +569,23 @@ else:
 
 # Supervisor unified (avoid NaN display, keep SIN_SUPERVISOR)
 if "Supervisor" not in df.columns:
-    if col_supervisor_auto:
-        df["Supervisor"] = df[col_supervisor_auto].astype(str).replace({"nan": "", "None": ""}).str.strip()
+    df["Supervisor"] = "SIN_SUPERVISOR"
+
+if "Fuente" in df.columns:
+    if col_supervisor_cc2 and col_supervisor_cc2 in df.columns:
+        m = df["Fuente"].astype(str).eq("CC2")
+        df.loc[m, "Supervisor"] = df.loc[m, col_supervisor_cc2].astype(str).replace({"nan": "", "None": ""}).str.strip()
+        df.loc[m & df["Supervisor"].astype(str).str.strip().eq(""), "Supervisor"] = "SIN_SUPERVISOR"
+
+    if col_supervisor_jv and col_supervisor_jv in df.columns:
+        m = df["Fuente"].astype(str).eq("JV")
+        df.loc[m, "Supervisor"] = df.loc[m, col_supervisor_jv].astype(str).replace({"nan": "", "None": ""}).str.strip()
+        df.loc[m & df["Supervisor"].astype(str).str.strip().eq(""), "Supervisor"] = "SIN_SUPERVISOR"
+else:
+    # Fallback (should not happen, but keep behavior)
+    if col_supervisor_cc2:
+        df["Supervisor"] = df[col_supervisor_cc2].astype(str).replace({"nan": "", "None": ""}).str.strip()
         df.loc[df["Supervisor"].eq(""), "Supervisor"] = "SIN_SUPERVISOR"
-    else:
-        df["Supervisor"] = "SIN_SUPERVISOR"
 
 # Adjusted Código Resultado (adeudo rule, <1500 => ADEUDO_TRATABLE)
 df, col_result = add_adeudo_tratable(df, col_result_raw, col_obs, threshold=1500.0)
@@ -658,7 +719,7 @@ k4.metric("Agente colgó (%)", f"{hang_rate:,.2f}%")
 # EXCEL KEY (invalidate prepared excel when filters change)
 # ----------------------------------------------------
 excel_key = (
-    source_label,
+    tuple(selected_sources),
     str(d_start),
     str(d_end),
     tuple(selected_campaigns),
@@ -676,9 +737,7 @@ if st.session_state.excel_key != excel_key:
 # ----------------------------------------------------
 # TABS
 # ----------------------------------------------------
-tab1, tab3, tab4 = st.tabs(
-    ["Tipificacion", "Agente colgó", "Detalle + Excel"]
-)
+tab1, tab3, tab4 = st.tabs(["Tipificacion", "Agente colgó", "Detalle + Excel"])
 
 with tab1:
     st.markdown("### Tipificación por **Tipificacion** (ajustada a filtros)")
@@ -687,39 +746,45 @@ with tab1:
     else:
         g = df_f.groupby([group_col, col_estatus], as_index=False).size().rename(columns={"size": "count"})
         fig = px.bar(
-            g, x=group_col, y="count", color=col_estatus, barmode="stack",
+            g,
+            x=group_col,
+            y="count",
+            color=col_estatus,
+            barmode="stack",
             title=f"Tipificacion por {view_mode}",
             labels={col_estatus: "Tipificacion"},
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         tbl = make_pct_table(g, group_col, col_estatus, "count")
         tbl = attach_supervisor_to_tipificacion_table(tbl, df_f, group_col)
-        st.dataframe(tbl, use_container_width=True, height=420)
+        st.dataframe(tbl, width="stretch", height=420)
 
-        # ✅ Subtificación correspondiente (MOVED HERE, and tab removed)
         st.markdown("### Subtificación correspondiente (Código Resultado) — ajustada a filtros")
         if not col_result:
             st.info("No existe la columna Codigo_Resultado_CC (Subtificación) en estos datos.")
         else:
             g2 = df_f.groupby([group_col, col_result], as_index=False).size().rename(columns={"size": "count"})
             fig2 = px.bar(
-                g2, x=group_col, y="count", color=col_result, barmode="stack",
+                g2,
+                x=group_col,
+                y="count",
+                color=col_result,
+                barmode="stack",
                 title=f"Subtificación por {view_mode}",
                 labels={col_result: "Subtificación"},
             )
-            st.plotly_chart(fig2, use_container_width=True)
-            st.dataframe(make_pct_table(g2, group_col, col_result, "count"), use_container_width=True, height=420)
+            st.plotly_chart(fig2, width="stretch")
+            st.dataframe(make_pct_table(g2, group_col, col_result, "count"), width="stretch", height=420)
 
 with tab3:
     st.markdown("### **Agente colgó** (conteo y %), ajustado a filtros")
     g = df_f.groupby(group_col, as_index=False).agg(total=("Hangup_Flag", "size"), colgo=("Hangup_Flag", "sum"))
     g["pct_colgo"] = (g["colgo"] / g["total"].replace(0, 1) * 100).round(2)
     fig = px.bar(g, x=group_col, y="pct_colgo", title=f"% Agente colgó por {view_mode}")
-    st.plotly_chart(fig, use_container_width=True)
-    st.dataframe(g.sort_values("pct_colgo", ascending=False), use_container_width=True, height=420)
+    st.plotly_chart(fig, width="stretch")
+    st.dataframe(g.sort_values("pct_colgo", ascending=False), width="stretch", height=420)
 
-    # ✅ Subtificación de SOLO llamadas colgadas (plot + tabla)
     st.markdown("### Subtificación de **llamadas colgadas** (ajustada a filtros)")
     if not col_result:
         st.info("No existe la columna Codigo_Resultado_CC (Subtificación) en estos datos.")
@@ -738,19 +803,18 @@ with tab3:
                 title=f"Subtificación (solo colgadas) por {view_mode}",
                 labels={col_result: "Subtificación"},
             )
-            st.plotly_chart(fig_h, use_container_width=True)
-            st.dataframe(make_pct_table(g_h, group_col, col_result, "count"), use_container_width=True, height=420)
+            st.plotly_chart(fig_h, width="stretch")
+            st.dataframe(make_pct_table(g_h, group_col, col_result, "count"), width="stretch", height=420)
 
 with tab4:
     st.markdown("### Detalle filtrado")
-    st.dataframe(df_f, use_container_width=True, height=520)
+    st.dataframe(df_f, width="stretch", height=520)
 
-    # ✅ ON-DEMAND Excel to avoid Streamlit Cloud crashes
     c1, c2 = st.columns([1, 1])
     with c1:
-        prepare_excel = st.button("📦 Preparar Excel (on-demand)", use_container_width=True)
+        prepare_excel = st.button("📦 Preparar Excel (on-demand)", width="stretch")
     with c2:
-        clear_excel = st.button("🧹 Limpiar Excel preparado", use_container_width=True)
+        clear_excel = st.button("🧹 Limpiar Excel preparado", width="stretch")
 
     if clear_excel:
         st.session_state.excel_bytes = None
@@ -768,9 +832,9 @@ with tab4:
         st.download_button(
             "⬇️ Descargar Excel (filtrado)",
             data=st.session_state.excel_bytes,
-            file_name=f"bonsaif_m27_{source_label}_detalle_filtrado.xlsx",
+            file_name=f"bonsaif_m27_{sources_tag}_detalle_filtrado.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
         )
     else:
         st.info("Para evitar crashes, el Excel se genera **solo** cuando presionas **Preparar Excel**.")
