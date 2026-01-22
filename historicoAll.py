@@ -241,9 +241,22 @@ def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
 
 def make_pct_table(grouped: pd.DataFrame, group_col: str, cat_col: str, value_col: str = "count") -> pd.DataFrame:
     pivot = grouped.pivot_table(index=group_col, columns=cat_col, values=value_col, aggfunc="sum", fill_value=0)
+
+    # ✅ ONLY CHANGE: rename blank/NaN headers to "Sin Tipificacion" (and merge if duplicates)
+    new_cols = []
+    for c in pivot.columns:
+        s = "" if c is None else str(c).strip()
+        if s == "" or s.lower() == "nan":
+            new_cols.append("Sin Tipificacion")
+        else:
+            new_cols.append(s)
+    pivot.columns = new_cols
+    if len(set(new_cols)) != len(new_cols):
+        pivot = pivot.groupby(level=0, axis=1).sum()
+
     row_sum = pivot.sum(axis=1).replace(0, 1)
     pct = (pivot.div(row_sum, axis=0) * 100).round(2)
-    pct.columns = [f"{c} (%)" for c in pct.columns]
+    pct.columns = [f"{c} (%)" for c in pivot.columns]
     return pd.concat([pivot, pct], axis=1).reset_index()
 
 # ----------------------------------------------------
