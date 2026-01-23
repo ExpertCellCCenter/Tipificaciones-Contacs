@@ -759,6 +759,20 @@ with tab1:
             title=f"Tipificacion por {view_mode}",
             labels={col_estatus: "Tipificacion"},
         )
+
+            # ✅ Totales arriba de cada barra (stack)
+        totals = g.groupby(group_col, as_index=False)["count"].sum()
+        fig.add_scatter(
+            x=totals[group_col],
+            y=totals["count"],
+            mode="text",
+            text=totals["count"].map(lambda v: f"{int(v):,}"),
+            textposition="top center",
+            showlegend=False,
+        )
+        max_total = int(totals["count"].max()) if not totals.empty else 0
+        fig.update_yaxes(range=[0, max_total * 1.15 if max_total > 0 else 1])
+
         st.plotly_chart(fig, width="stretch")
 
         tbl = make_pct_table(g, group_col, col_estatus, "count")
@@ -779,6 +793,20 @@ with tab1:
                 title=f"Subtificación por {view_mode}",
                 labels={col_result: "Subtificación"},
             )
+
+                        # ✅ Totales arriba de cada barra (stack)
+            totals2 = g2.groupby(group_col, as_index=False)["count"].sum()
+            fig2.add_scatter(
+                x=totals2[group_col],
+                y=totals2["count"],
+                mode="text",
+                text=totals2["count"].map(lambda v: f"{int(v):,}"),
+                textposition="top center",
+                showlegend=False,
+            )
+            max_total2 = int(totals2["count"].max()) if not totals2.empty else 0
+            fig2.update_yaxes(range=[0, max_total2 * 1.15 if max_total2 > 0 else 1])
+
             st.plotly_chart(fig2, width="stretch")
             st.dataframe(make_pct_table(g2, group_col, col_result, "count"), width="stretch", height=420)
 
@@ -787,6 +815,10 @@ with tab3:
     g = df_f.groupby(group_col, as_index=False).agg(total=("Hangup_Flag", "size"), colgo=("Hangup_Flag", "sum"))
     g["pct_colgo"] = (g["colgo"] / g["total"].replace(0, 1) * 100).round(2)
     fig = px.bar(g, x=group_col, y="pct_colgo", title=f"% Agente colgó por {view_mode}")
+        # ✅ Valores arriba de cada barra
+    fig.update_traces(texttemplate="%{y:.2f}%", textposition="outside", cliponaxis=False)
+    max_pct = float(g["pct_colgo"].max()) if not g.empty else 0.0
+    fig.update_yaxes(range=[0, min(110, max_pct * 1.15 if max_pct > 0 else 1)])
     st.plotly_chart(fig, width="stretch")
     st.dataframe(g.sort_values("pct_colgo", ascending=False), width="stretch", height=420)
 
@@ -808,6 +840,20 @@ with tab3:
                 title=f"Subtificación (solo colgadas) por {view_mode}",
                 labels={col_result: "Subtificación"},
             )
+
+            # ✅ Totales arriba de cada barra (stack)
+            totals_h = g_h.groupby(group_col, as_index=False)["count"].sum()
+            fig_h.add_scatter(
+                x=totals_h[group_col],
+                y=totals_h["count"],
+                mode="text",
+                text=totals_h["count"].map(lambda v: f"{int(v):,}"),
+                textposition="top center",
+                showlegend=False,
+            )
+            max_total_h = int(totals_h["count"].max()) if not totals_h.empty else 0
+            fig_h.update_yaxes(range=[0, max_total_h * 1.15 if max_total_h > 0 else 1])
+
             st.plotly_chart(fig_h, width="stretch")
             st.dataframe(make_pct_table(g_h, group_col, col_result, "count"), width="stretch", height=420)
 
