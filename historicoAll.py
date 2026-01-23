@@ -122,6 +122,11 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name="m27", max_autofit_rows: int = 2
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
+    # ✅ ADD EXCEL FILTER DROPDOWNS ON HEADER ROW (AutoFilter)
+    if ws.max_row >= 1 and ws.max_column >= 1:
+        last_col_letter = get_column_letter(ws.max_column)
+        ws.auto_filter.ref = f"A1:{last_col_letter}{ws.max_row}"
+
     # ✅ Auto-fit using a SAMPLE (header + first N rows)
     sample_last_row = min(ws.max_row, 1 + max_autofit_rows)  # row 1 is header
     for col_idx in range(1, ws.max_column + 1):
